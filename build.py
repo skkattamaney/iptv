@@ -5,6 +5,8 @@ category. English-language channels from every other country follow under "World
 Every stream is then tested, and only the ones that answer are kept.
 """
 import collections
+import datetime
+import json
 import os
 import re
 import urllib.request
@@ -16,6 +18,8 @@ COUNTRIES = (("gh", "Ghana"), ("uk", "UK"), ("us", "US"))
 OUTPUT = "english-channels.m3u"
 MIN_CHANNELS = 1000  # refuse to overwrite the playlist after a broken download or check
 RETEST_GROUP = "Test on TV (needs special headers)"
+HOME_STATUS = "home-status.json"  # written by home_check.py
+HOME_STATUS_MAX_AGE = 45  # days before the home record is ignored as stale
 
 
 def fetch(path):
@@ -70,6 +74,20 @@ def collect():
     return entries
 
 
+def load_home_status():
+    """Return {url: status} from the last home-network check, or {} when missing or stale."""
+    try:
+        with open(HOME_STATUS, encoding="utf-8") as f:
+            data = json.load(f)
+        age = (datetime.date.today() - datetime.date.fromisoformat(data["checked"])).days
+    except (OSError, ValueError, KeyError):
+        return {}
+    if age > HOME_STATUS_MAX_AGE:
+        print(f"home record is {age} days old; ignoring it")
+        return {}
+    return data["streams"]
+
+
 def main():
     entries = collect()
     print("found", len(entries), "English channels")
@@ -79,6 +97,24 @@ def main():
     else:
         results = check_all(entries)
         print(collections.Counter(status for status, _ in results))
+        home = load_home_status()
+        if home:
+            # A stream blocked at home is dropped even when GitHub can reach it. A stream
+            # that worked at home is kept when GitHub is merely refused (data-centre
+            # blocks), but not when the address has gone (404/410), which means it died
+            # after the home check.
+            merged = []
+            for (_, url), (status, why) in zip(entries, results):
+                seen_at_home = home.get(url)
+                gone = "404" in why or "410" in why
+                if seen_at_home == "dead":
+                    status = "dead"
+                elif seen_at_home and not gone:
+                    status = seen_at_home
+                merged.append((status, why))
+            changed = sum(a[0] != b[0] for a, b in zip(merged, results))
+            print(f"home record changed {changed} results")
+            results = merged
         kept, retest = [], []
         for (meta, url), (status, _) in zip(entries, results):
             if status == "ok":
