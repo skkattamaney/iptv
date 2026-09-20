@@ -2,14 +2,20 @@
 
 Ghana, UK and US English-language channels come first, grouped by country and
 category. English-language channels from every other country follow under "World".
+Every stream is then tested, and only the ones that answer are kept.
 """
+import collections
+import os
 import re
 import urllib.request
+
+from check import check_all
 
 BASE = "https://iptv-org.github.io/iptv/"
 COUNTRIES = (("gh", "Ghana"), ("uk", "UK"), ("us", "US"))
 OUTPUT = "english-channels.m3u"
-MIN_CHANNELS = 1000  # refuse to overwrite the playlist with a broken download
+MIN_CHANNELS = 1000  # refuse to overwrite the playlist after a broken download or check
+RETEST_GROUP = "Test on TV (needs special headers)"
 
 
 def fetch(path):
@@ -48,34 +54,48 @@ def regroup(meta, label):
     return meta
 
 
-def main():
+def collect():
     english = parse(fetch("languages/eng.m3u"))
     english_urls = {url for _, url in english}
-    out, seen, stats = ["#EXTM3U"], set(), {}
-
+    entries, seen = [], set()
     for code, label in COUNTRIES:
-        count = 0
         for meta, url in parse(fetch(f"countries/{code}.m3u")):
-            if url not in english_urls or url in seen:
-                continue
-            seen.add(url)
-            out += regroup(meta, label) + [url]
-            count += 1
-        stats[label] = count
-
-    count = 0
+            if url in english_urls and url not in seen:
+                seen.add(url)
+                entries.append((regroup(meta, label), url))
     for meta, url in english:
-        if url in seen:
-            continue
-        seen.add(url)
-        out += regroup(meta, "World") + [url]
-        count += 1
-    stats["World"] = count
+        if url not in seen:
+            seen.add(url)
+            entries.append((regroup(meta, "World"), url))
+    return entries
 
-    total = sum(stats.values())
-    print(stats, "total", total)
-    if total < MIN_CHANNELS:
-        raise SystemExit(f"Only {total} channels found; keeping the previous playlist.")
+
+def main():
+    entries = collect()
+    print("found", len(entries), "English channels")
+
+    if os.environ.get("SKIP_CHECK"):
+        kept = entries
+    else:
+        results = check_all(entries)
+        print(collections.Counter(status for status, _ in results))
+        kept, retest = [], []
+        for (meta, url), (status, _) in zip(entries, results):
+            if status == "ok":
+                kept.append((meta, url))
+            elif status == "needs-headers":
+                # Alive, but only for players that send the Referer/User-Agent
+                # given in the #EXTVLCOPT lines. Grouped apart so they are easy to try.
+                meta[0] = re.sub(r'group-title="[^"]*"', f'group-title="{RETEST_GROUP}"', meta[0])
+                retest.append((meta, url))
+        kept += retest
+
+    print("keeping", len(kept), "working channels")
+    if len(kept) < MIN_CHANNELS:
+        raise SystemExit(f"Only {len(kept)} channels passed; keeping the previous playlist.")
+    out = ["#EXTM3U"]
+    for meta, url in kept:
+        out += meta + [url]
     with open(OUTPUT, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
 
