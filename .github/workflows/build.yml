@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["build.py", "check.py", ".github/workflows/build.yml"]
+    paths: ["build.py", "check.py", "home-status.json", ".github/workflows/build.yml"]
 
 permissions:
   contents: write
